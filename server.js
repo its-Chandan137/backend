@@ -1,67 +1,71 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const dotenv = require('dotenv'); // Added dotenv for environment variables
 const http = require('http');
-const { Server } = require('socket.io');
-const userRoutes = require('./routes/userRoutes'); // Import user routes
-const Message = require('./models/Message'); // Import Message model
+const mongoose = require('mongoose');
+const socketio = require('socket.io');
+const dotenv = require('dotenv');
+const messageRoutes = require('./routes/messageRoutes');
+const userRoutes = require('./routes/userRoutes');
+const cors = require('cors');
 
-dotenv.config(); // Load environment variables
-
-// Connect to MongoDB using the new database specified in .env
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
+const io = socketio(server, {
   cors: {
-    origin: '*', // Allow all origins (adjust for production)
-    methods: ['GET', 'POST'],
+    origin: '*',
   },
 });
 
-// Middlewares
 app.use(cors());
-app.use(bodyParser.json());
-app.use('/users', userRoutes);
 
-// Socket.IO handling
+app.use(express.json());
+app.use('/api/messages', messageRoutes);
+app.use('/api/users', userRoutes);
+
+mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+  })
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => {
+    console.error('MongoDB connection error:', err);  // Add log here
+  });
+
+
+
+
+
+let users = {};
+
 io.on('connection', (socket) => {
-  console.log('New client connected:', socket.id);
-
-  socket.on('message', async (data) => {
-    const { sender, recipient, content } = data;
-
-    const newMessage = new Message({ sender, recipient, content });
-    await newMessage.save(); // Save the message to MongoDB
-
-    // Emit the message back to the sender and recipient
-    socket.emit('message', newMessage); // Send to the sender
-    socket.broadcast.emit('message', newMessage); // Broadcast to others (recipient)
+    console.log('New socket connection', socket.id);
+  
+    socket.on('join', ({ userId }) => {
+      users[socket.id] = userId;
+      socket.join(userId); // Join the room for the specific userId
+      socket.broadcast.emit('userOnline', userId);
+    });
+  
+    socket.on('sendMessage', async ({ senderId, receiverId, text }) => {
+      const message = { senderId, receiverId, text, timestamp: new Date() };
+  
+      // Emit the message to the receiver's room
+      io.to(receiverId).emit('receiveMessage', message);
+  
+      // Save the message to MongoDB
+      try {
+        await mongoose.model('Message').create(message);
+      } catch (error) {
+        console.error('Error saving message:', error);
+      }
+    });
+  
+    socket.on('disconnect', () => {
+      console.log('User disconnected', socket.id);
+      delete users[socket.id];
+    });
   });
+  
 
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
-  });
-});
-
-// API to fetch conversation history
-app.get('/messages/:user', async (req, res) => {
-  const { user } = req.params;
-  const messages = await Message.find({
-    $or: [{ sender: user }, { recipient: user }],
-  }).sort({ timestamp: 1 });
-  res.json(messages);
-});
-
-// Start the Express server
-server.listen(process.env.PORT, () => {
-  console.log(`Server is running on http://localhost:${process.env.PORT}`);
-});
-
-console.log(`Socket.IO server is running on ws://localhost:${process.env.SOCKET_PORT}`);
+server.listen(5000, () => console.log('Server running on port 5000'));
